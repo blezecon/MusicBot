@@ -1,0 +1,34 @@
+{
+  "name": "blezeconjr",
+  "version": "1.0.0",
+  "description": "A personal dc bot, which helps to play song.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blezecon/BlezeconJr.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/blezecon/BlezeconJr/issues"
+  },
+  "homepage": "https://github.com/blezecon/BlezeconJr#readme",
+  "devDependencies": {
+    "@discordjs/voice": "^0.18.0",
+    "@distube/ytdl-core": "^4.16.12",
+    "discord.js": "^14.21.0",
+    "dotenv": "^16.6.0",
+    "ffmpeg-static": "^5.2.0",
+    "nodemon": "^3.1.10",
+    "youtube-sr": "^4.3.11"
+  },
+  "dependencies": {
+    "opusscript": "^0.0.8"
+  }
+}
