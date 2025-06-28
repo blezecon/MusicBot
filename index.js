@@ -83,6 +83,174 @@ const commands = [
     .setDescription('Make the bot leave the voice channel')
 ].map(command => command.toJSON());
 
+// Function to detect if a URL is a YouTube playlist and what type
+function isYouTubePlaylist(url) {
+  const isRegularPlaylist = url.includes('youtube.com/playlist?list=') || 
+                           (url.includes('youtube.com/watch?v=') && url.includes('&list=PL'));
+  
+  const isMixPlaylist = url.includes('&list=RD') || url.includes('?list=RD');
+  const isWatchLaterPlaylist = url.includes('&list=WL') || url.includes('?list=WL');
+  const isLikesPlaylist = url.includes('&list=LL') || url.includes('?list=LL');
+  
+  // Any playlist type
+  const isAnyPlaylist = isRegularPlaylist || isMixPlaylist || isWatchLaterPlaylist || isLikesPlaylist ||
+                        url.includes('&list=') || url.includes('?list=');
+  
+  return { 
+    isPlaylist: isAnyPlaylist, 
+    isMix: isMixPlaylist,
+    isRegular: isRegularPlaylist,
+    isWatchLater: isWatchLaterPlaylist,
+    isLikes: isLikesPlaylist
+  };
+}
+
+// Extract video ID from YouTube URL
+function extractVideoId(url) {
+  const match = url.match(/[?&]v=([^&]+)/);
+  if (match && match[1]) {
+    return match[1];
+  }
+  
+  // Handle youtu.be links
+  const shortMatch = url.match(/youtu\.be\/([^?&]+)/);
+  if (shortMatch && shortMatch[1]) {
+    return shortMatch[1];
+  }
+  
+  return null;
+}
+
+// Extract playlist ID from YouTube URL
+function extractPlaylistId(url) {
+  const match = url.match(/[?&]list=([^&]+)/);
+  if (match && match[1]) {
+    return match[1];
+  }
+  return null;
+}
+
+// Function to fetch all videos from a playlist
+async function getPlaylistVideos(playlistUrl) {
+  try {
+    // Extract video ID and check if it's a special playlist
+    const playlistInfo = isYouTubePlaylist(playlistUrl);
+    const playlistId = extractPlaylistId(playlistUrl);
+    
+    if (!playlistId) {
+      throw new Error('Could not extract playlist ID from URL');
+    }
+    
+    // Handle special playlists (Mix, Watch Later, Likes, etc.)
+    if (playlistInfo.isMix || !playlistInfo.isRegular) {
+      console.log(`🎵 Detected special YouTube playlist (${playlistId}), using alternate fetching method`);
+      
+      // First, try to get the video ID if we're on a watch page
+      let videoId = extractVideoId(playlistUrl);
+      
+      // If we have a video ID, start with that video
+      let videos = [];
+      
+      if (videoId) {
+        const videoInfo = await ytdl.getInfo(videoId);
+        
+        // Add the current video
+        videos.push({
+          title: videoInfo.videoDetails.title,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          duration: videoInfo.videoDetails.lengthSeconds ? 
+            `${Math.floor(videoInfo.videoDetails.lengthSeconds / 60)}:${(videoInfo.videoDetails.lengthSeconds % 60).toString().padStart(2, '0')}` : 'N/A',
+          thumbnail: videoInfo.videoDetails.thumbnails?.[0]?.url || null
+        });
+        
+        // Get related videos (up to 19) to build a queue of 20 videos
+        const relatedVideos = videoInfo.related_videos
+          .slice(0, 19)
+          .map(video => ({
+            title: video.title || 'Unknown Title',
+            url: `https://www.youtube.com/watch?v=${video.id}`,
+            duration: video.length_seconds ? 
+              `${Math.floor(video.length_seconds / 60)}:${(video.length_seconds % 60).toString().padStart(2, '0')}` : 'N/A',
+            thumbnail: video.thumbnails?.[0]?.url || null
+          }));
+        
+        videos = [...videos, ...relatedVideos];
+      } else {
+        // If we don't have a video ID, try to search for the playlist
+        try {
+          // For Mix playlists, we'll try to search for videos
+          const searchResults = await YouTube.search(playlistId, { 
+            limit: 20, 
+            type: 'video'
+          });
+          
+          if (searchResults && searchResults.length > 0) {
+            videos = searchResults.map(video => ({
+              title: video.title,
+              url: video.url,
+              duration: video.durationFormatted || 'N/A',
+              thumbnail: video.thumbnail?.url || null
+            }));
+          }
+        } catch (searchError) {
+          console.error('Failed to search for playlist videos:', searchError);
+          // Continue with empty or partial list
+        }
+      }
+      
+      if (videos.length === 0) {
+        throw new Error('Could not find any videos in the playlist');
+      }
+      
+      return videos;
+    } 
+    // Regular playlist handling
+    else {
+      try {
+        // First try YouTube-sr library
+        const playlist = await YouTube.getPlaylist(playlistUrl);
+        
+        if (playlist && playlist.videos && playlist.videos.length > 0) {
+          return playlist.videos.map(video => ({
+            title: video.title,
+            url: `https://www.youtube.com/watch?v=${video.id}`,
+            duration: video.durationFormatted || 'N/A',
+            thumbnail: video.thumbnail?.url || null
+          }));
+        }
+      } catch (playlistError) {
+        console.error('Error fetching playlist with YouTube-sr:', playlistError);
+        // Continue to fallback method
+      }
+      
+      // Fallback: try to search for the playlist ID
+      try {
+        const searchResults = await YouTube.search(playlistId, { 
+          limit: 50, 
+          type: 'video'
+        });
+        
+        if (searchResults && searchResults.length > 0) {
+          return searchResults.map(video => ({
+            title: video.title,
+            url: video.url,
+            duration: video.durationFormatted || 'N/A',
+            thumbnail: video.thumbnail?.url || null
+          }));
+        } else {
+          throw new Error('No videos found in playlist');
+        }
+      } catch (searchError) {
+        console.error('Error searching for playlist videos:', searchError);
+        throw searchError;
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching playlist:', error);
+    return null;
+  }
+}
+
 // Optimized channel fetching with caching
 async function getCachedChannel(channelId) {
   if (cache.channels.has(channelId)) {
@@ -412,7 +580,7 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Optimized play handler with caching
+// Optimized play handler with enhanced playlist support
 async function handlePlay(interaction) {
   const song = interaction.options.getString('song');
   const voiceChannel = interaction.member?.voice?.channel;
@@ -434,77 +602,189 @@ async function handlePlay(interaction) {
   await interaction.deferReply();
 
   try {
-    let songInfo;
-    
     // Check if it's a YouTube URL
-    if (/(?:youtube\.com\/watch\?v=|youtu\.be\/)/.test(song)) {
-      // Check cache first
-      if (cache.ytdlInfo.has(song)) {
-        songInfo = cache.ytdlInfo.get(song);
-      } else {
-        const info = await ytdl.getInfo(song);
-        songInfo = {
-          title: info.videoDetails.title,
-          url: song,
-          duration: info.videoDetails.lengthSeconds ? 
-            `${Math.floor(info.videoDetails.lengthSeconds / 60)}:${(info.videoDetails.lengthSeconds % 60).toString().padStart(2, '0')}` : 'N/A',
-          thumbnail: info.videoDetails.thumbnails?.[0]?.url
-        };
-        // Cache the result
-        cache.ytdlInfo.set(song, songInfo);
+    if (/(?:youtube\.com\/|youtu\.be\/)/.test(song)) {
+      
+      // Check if it's a playlist
+      const playlistInfo = isYouTubePlaylist(song);
+      if (playlistInfo.isPlaylist) {
+        // Process playlist
+        console.log(`🎵 Detected YouTube playlist: ${song}`);
+        const playlistVideos = await getPlaylistVideos(song);
+        
+        if (!playlistVideos || playlistVideos.length === 0) {
+          return interaction.editReply('❌ Failed to load playlist or playlist is empty.');
+        }
+        
+        clearIdleTimeout();
+
+        // Setup voice connection if needed
+        if (!voiceConnection || !isBotInAnyVC() || voiceConnection.joinConfig.channelId !== voiceChannel.id) {
+          if (voiceConnection) {
+            voiceConnection.destroy();
+          }
+          
+          voiceConnection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: interaction.guild.id,
+            adapterCreator: interaction.guild.voiceAdapterCreator,
+          });
+
+          setupVoiceConnectionListeners(voiceConnection);
+          
+          try {
+            await entersState(voiceConnection, VoiceConnectionStatus.Ready, 10_000);
+            console.log(`🔗 Joined voice channel: ${voiceChannel.name}`);
+          } catch (error) {
+            console.error('❌ Failed to join voice channel:', error.message);
+            return interaction.editReply('❌ Failed to join voice channel. Please try again.');
+          }
+        }
+
+        // Add all videos to queue
+        playlistVideos.forEach(video => currentQueue.push(video));
+        
+        const playlistType = playlistInfo.isMix ? "Mix" : 
+                            playlistInfo.isWatchLater ? "Watch Later" : 
+                            playlistInfo.isLikes ? "Liked Videos" : "Playlist";
+        
+        const embed = new EmbedBuilder()
+          .setColor('#00ff00')
+          .setTitle(`🎵 ${playlistType} Added to Queue`)
+          .setDescription(`Added **${playlistVideos.length} songs** to queue.`)
+          .addFields(
+            { name: 'First Song', value: playlistVideos[0].title, inline: true },
+            { name: 'Total Songs', value: `${playlistVideos.length}`, inline: true }
+          );
+
+        await interaction.editReply({ embeds: [embed] });
+
+        if (!isPlaying) {
+          setImmediate(() => playNextSong());
+        }
+        
+        return;
+      } 
+      // Single video URL
+      else {
+        let songInfo;
+        // Check cache first
+        if (cache.ytdlInfo.has(song)) {
+          songInfo = cache.ytdlInfo.get(song);
+        } else {
+          const info = await ytdl.getInfo(song);
+          songInfo = {
+            title: info.videoDetails.title,
+            url: song,
+            duration: info.videoDetails.lengthSeconds ? 
+              `${Math.floor(info.videoDetails.lengthSeconds / 60)}:${(info.videoDetails.lengthSeconds % 60).toString().padStart(2, '0')}` : 'N/A',
+            thumbnail: info.videoDetails.thumbnails?.[0]?.url
+          };
+          // Cache the result
+          cache.ytdlInfo.set(song, songInfo);
+        }
+        
+        clearIdleTimeout();
+
+        // Optimized voice connection handling
+        if (!voiceConnection || !isBotInAnyVC() || voiceConnection.joinConfig.channelId !== voiceChannel.id) {
+          
+          if (voiceConnection) {
+            voiceConnection.destroy();
+          }
+          
+          voiceConnection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: interaction.guild.id,
+            adapterCreator: interaction.guild.voiceAdapterCreator,
+          });
+
+          setupVoiceConnectionListeners(voiceConnection);
+          
+          try {
+            await entersState(voiceConnection, VoiceConnectionStatus.Ready, 10_000);
+            console.log(`🔗 Joined voice channel: ${voiceChannel.name}`);
+          } catch (error) {
+            console.error('❌ Failed to join voice channel:', error.message);
+            return interaction.editReply('❌ Failed to join voice channel. Please try again.');
+          }
+        }
+
+        currentQueue.push(songInfo);
+
+        const embed = new EmbedBuilder()
+          .setColor('#00ff00')
+          .setTitle('🎵 Song Added to Queue')
+          .setDescription(`**${songInfo.title}**`)
+          .addFields(
+            { name: 'Duration', value: songInfo.duration, inline: true },
+            { name: 'Position in Queue', value: `${currentQueue.length}`, inline: true }
+          );
+
+        if (songInfo.thumbnail) {
+          embed.setThumbnail(songInfo.thumbnail);
+        }
+
+        await interaction.editReply({ embeds: [embed] });
+
+        if (!isPlaying) {
+          setImmediate(() => playNextSong());
+        }
       }
-    } else {
-      songInfo = await searchYouTube(song);
+    } 
+    // Search by name
+    else {
+      const songInfo = await searchYouTube(song);
       if (!songInfo) {
         return interaction.editReply('❌ No results found for your search.');
       }
-    }
 
-    clearIdleTimeout();
+      clearIdleTimeout();
 
-    // Optimized voice connection handling
-    if (!voiceConnection || !isBotInAnyVC() || voiceConnection.joinConfig.channelId !== voiceChannel.id) {
-      
-      if (voiceConnection) {
-        voiceConnection.destroy();
+      // Optimized voice connection handling
+      if (!voiceConnection || !isBotInAnyVC() || voiceConnection.joinConfig.channelId !== voiceChannel.id) {
+        
+        if (voiceConnection) {
+          voiceConnection.destroy();
+        }
+        
+        voiceConnection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: interaction.guild.id,
+          adapterCreator: interaction.guild.voiceAdapterCreator,
+        });
+
+        setupVoiceConnectionListeners(voiceConnection);
+        
+        try {
+          await entersState(voiceConnection, VoiceConnectionStatus.Ready, 10_000);
+          console.log(`🔗 Joined voice channel: ${voiceChannel.name}`);
+        } catch (error) {
+          console.error('❌ Failed to join voice channel:', error.message);
+          return interaction.editReply('❌ Failed to join voice channel. Please try again.');
+        }
       }
-      
-      voiceConnection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: interaction.guild.id,
-        adapterCreator: interaction.guild.voiceAdapterCreator,
-      });
 
-      setupVoiceConnectionListeners(voiceConnection);
-      
-      try {
-        await entersState(voiceConnection, VoiceConnectionStatus.Ready, 10_000);
-        console.log(`🔗 Joined voice channel: ${voiceChannel.name}`);
-      } catch (error) {
-        console.error('❌ Failed to join voice channel:', error.message);
-        return interaction.editReply('❌ Failed to join voice channel. Please try again.');
+      currentQueue.push(songInfo);
+
+      const embed = new EmbedBuilder()
+        .setColor('#00ff00')
+        .setTitle('🎵 Song Added to Queue')
+        .setDescription(`**${songInfo.title}**`)
+        .addFields(
+          { name: 'Duration', value: songInfo.duration, inline: true },
+          { name: 'Position in Queue', value: `${currentQueue.length}`, inline: true }
+        );
+
+      if (songInfo.thumbnail) {
+        embed.setThumbnail(songInfo.thumbnail);
       }
-    }
 
-    currentQueue.push(songInfo);
+      await interaction.editReply({ embeds: [embed] });
 
-    const embed = new EmbedBuilder()
-      .setColor('#00ff00')
-      .setTitle('🎵 Song Added to Queue')
-      .setDescription(`**${songInfo.title}**`)
-      .addFields(
-        { name: 'Duration', value: songInfo.duration, inline: true },
-        { name: 'Position in Queue', value: `${currentQueue.length}`, inline: true }
-      );
-
-    if (songInfo.thumbnail) {
-      embed.setThumbnail(songInfo.thumbnail);
-    }
-
-    await interaction.editReply({ embeds: [embed] });
-
-    if (!isPlaying) {
-      setImmediate(() => playNextSong());
+      if (!isPlaying) {
+        setImmediate(() => playNextSong());
+      }
     }
 
   } catch (error) {
