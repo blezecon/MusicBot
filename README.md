@@ -1,2 +1,2 @@
-# BlezeconJr
-A personal dc bot, which helps to play song.
+# Music bot
+A personal dc bot, which helps to play song. No api required
